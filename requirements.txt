@@ -1,0 +1,9 @@
+tkinter
+pandas
+numpy
+scikit-learn
+xgboost
+matplotlib
+seaborn
+joblib
+tkcalendar
