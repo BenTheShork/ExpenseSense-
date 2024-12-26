@@ -63,6 +63,7 @@ ExpenseSense employs a sophisticated machine learning pipeline to transform expe
 git clone https://github.com/yourusername/ExpenseSense.git
 cd ExpenseSense
 pip install -r requirements.txt
+cd src
 python expense_sense.py
 ```
 
