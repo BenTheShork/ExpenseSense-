@@ -1,7 +1,8 @@
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_absolute_error
 import xgboost as xgb
 
 class ExpensePredictor:
@@ -61,48 +62,48 @@ class ExpensePredictor:
         for category in self.categories:
             # Skip if all zeros
             if y[category].eq(0).all():
-                trend_factors[category] = 0.02
+                trend_factors[category] = 0.0
                 continue
-
+            
             # Calculate year-over-year and recent trend
             category_data = y[category]
             
-            # Last 3 years yearly growth
+            # Last 5 years yearly growth
             try:
                 yearly_data = category_data.groupby(category_data.index.get_level_values('year')).mean()
                 # Explicitly specify dtype as float64
                 yearly_growth_rates = pd.Series(dtype=float) if len(yearly_data) <= 1 else yearly_data.pct_change().dropna()
             except:
-                # Explicitly specify dtype as float64
+                # Explicitly specify dtype as float64  
                 yearly_growth_rates = pd.Series(dtype=float)
             
-            # Recent monthly trend (last 12 months)
-            recent_data = category_data.tail(12)
+            # Recent monthly trend (last 24 months)
+            recent_data = category_data.tail(24)
             monthly_trend = recent_data.pct_change().mean()
             
-            # Combine trends with more weight to recent trend
+            # Combine trends with equal weight
             if len(yearly_growth_rates) > 0:
                 avg_yearly_growth = yearly_growth_rates.mean()
-                trend_factor = (0.4 * avg_yearly_growth + 0.6 * monthly_trend)
+                trend_factor = (avg_yearly_growth + monthly_trend) / 2
             else:
                 trend_factor = monthly_trend
             
-            # Bound the trend factor between -15% and +15%
-            trend_factor = max(min(trend_factor, 0.15), -0.15)
+            # Bound the trend factor between -10% and +10%  
+            trend_factor = max(min(trend_factor, 0.1), -0.1)
             
-            # Default to 2% if no significant trend detected
-            trend_factors[category] = trend_factor if abs(trend_factor) > 0.01 else 0.02
-    
+            # Default to 0% if no significant trend detected
+            trend_factors[category] = trend_factor if abs(trend_factor) > 0.005 else 0.0
+        
         return trend_factors
 
     def train_models(self, data):
-        """Train prediction models"""
+        """Train prediction models with hyperparameter tuning"""
         try:
             result = self.prepare_data(data)
             if result is None:
                 return False, {}
 
-            X, y = result
+            X, y = result  
             X_scaled = self.scaler.fit_transform(X)
             confidence_scores = {}
             
@@ -116,31 +117,39 @@ class ExpensePredictor:
                 if category not in active_categories:
                     confidence_scores[category] = 0
                     continue
-                    
+                
                 X_train, X_val, y_train, y_val = train_test_split(
                     X_scaled, y[category], test_size=0.2, random_state=42
                 )
+
+                parameters = {
+                    'n_estimators': [50, 100, 200],
+                    'max_depth': [5, 10, 20, 40],
+                    'learning_rate': [0.05, 0.1, 0.2]
+                }
                 
-                model = xgb.XGBRegressor(
-                    n_estimators=100,
-                    learning_rate=0.2,
-                    max_depth=20,
-                    random_state=42
+                xgb_model = xgb.XGBRegressor(random_state=42, n_jobs=-1)
+                model = GridSearchCV(
+                    estimator=xgb_model,
+                    param_grid=parameters, 
+                    scoring='neg_mean_absolute_error',
+                    cv=5,
+                    n_jobs=-1
                 )
                 model.fit(X_train, y_train)
-                val_pred = model.predict(X_val)
                 
-                confidence = self._calculate_confidence(y_train, y_val, val_pred)
+                best_model = model.best_estimator_
+                val_pred = best_model.predict(X_val)
+
+                confidence = self._calculate_confidence(y_train, y_val, val_pred)  
                 confidence_scores[category] = confidence
-                self.category_models[category] = model
+                self.category_models[category] = best_model
             
             return True, confidence_scores
-            
+        
         except Exception as e:
             print(f"Error training models: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            return False, {}
+            return False, {}   
 
     def predict_future_expenses(self, last_date, months_ahead):
         """Predict future expenses with trend adjustment"""
@@ -168,7 +177,7 @@ class ExpensePredictor:
                 
                 # Apply trend factor to prediction
                 trend_factor = self.trend_factors.get(category, 0.02)
-                adjusted_pred = base_pred * (1 + trend_factor)
+                adjusted_pred = base_pred * (1 + trend_factor) ** (np.arange(1, months_ahead+1) / 12)
                 
                 predictions[category] = adjusted_pred
                 print(f"Predicted {category} with trend factor {trend_factor}")
@@ -176,34 +185,34 @@ class ExpensePredictor:
                 predictions[category] = 0
                 
         return predictions
-
+    
     def _calculate_confidence(self, y_train, y_val, val_pred):
         """Calculate confidence score for predictions"""
         data_points = len(y_train)
         if data_points == 0:
             return 0
-
+        
         # Consistency score
         std_dev = np.std(y_train)
         mean_val = np.mean(y_train)
         cv = std_dev / mean_val if mean_val != 0 else float('inf')
         consistency_score = 1 / (1 + cv**2)
         
-        # Quantity score
-        min_points = 6
-        optimal_points = 12
+        # Quantity score  
+        min_points = 24
+        optimal_points = 60
         quantity_score = min(1.0, (data_points - min_points) / 
                            (optimal_points - min_points))
         
         # Accuracy score
-        mae = np.mean(np.abs(y_val - val_pred))
+        mae = mean_absolute_error(y_val, val_pred)
         accuracy_score = 1 - min(1, mae / (mean_val if mean_val != 0 else 1))
         
         # Combined score
         confidence = (
-            consistency_score * 0.4 +
-            quantity_score * 0.4 +
-            accuracy_score * 0.2
+            consistency_score * 0.3 +
+            quantity_score * 0.4 + 
+            accuracy_score * 0.3  
         ) * 100
         
-        return max(min(confidence, 95), 40)
+        return max(min(confidence, 95), 30)
